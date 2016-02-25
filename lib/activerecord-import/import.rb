@@ -342,7 +342,7 @@ class ActiveRecord::Base
               if model.class.column_defaults[name.to_s].is_a? Integer
                 model.read_attribute(name.to_s)
               else
-                model.read_attribute_before_type_cast(name.to_s)
+                model.read_attribute(name.to_s)
               end
             end
           # end
