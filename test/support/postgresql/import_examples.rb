@@ -1,5 +1,11 @@
 # encoding: UTF-8
 def should_support_postgresql_import_functionality
+  should_support_recursive_import
+
+  if ActiveRecord::Base.connection.supports_on_duplicate_key_update?
+    should_support_postgresql_upsert_functionality
+  end
+
   describe "#supports_imports?" do
     it "should support import" do
       assert ActiveRecord::Base.supports_import?
@@ -15,112 +21,6 @@ def should_support_postgresql_import_functionality
 
         result = Topic.import Build(7, :topics)
         assert_equal 1, result.num_inserts
-      end
-    end
-
-    describe "importing objects with associations" do
-      let(:new_topics) { Build(num_topics, :topic_with_book) }
-      let(:new_topics_with_invalid_chapter) do
-        chapter = new_topics.first.books.first.chapters.first
-        chapter.title = nil
-        new_topics
-      end
-      let(:num_topics) { 3 }
-      let(:num_books) { 6 }
-      let(:num_chapters) { 18 }
-      let(:num_endnotes) { 24 }
-
-      let(:new_question_with_rule) { FactoryGirl.build :question, :with_rule }
-
-      it 'imports top level' do
-        assert_difference "Topic.count", +num_topics do
-          Topic.import new_topics, recursive: true
-          new_topics.each do |topic|
-            assert_not_nil topic.id
-          end
-        end
-      end
-
-      it 'imports first level associations' do
-        assert_difference "Book.count", +num_books do
-          Topic.import new_topics, recursive: true
-          new_topics.each do |topic|
-            topic.books.each do |book|
-              assert_equal topic.id, book.topic_id
-            end
-          end
-        end
-      end
-
-      it 'imports polymorphic associations' do
-        discounts = Array.new(1) { |i| Discount.new(amount: i) }
-        books = Array.new(1) { |i| Book.new(author_name: "Author ##{i}", title: "Book ##{i}") }
-        books.each do |book|
-          book.discounts << discounts
-        end
-        Book.import books, recursive: true
-        books.each do |book|
-          book.discounts.each do |discount|
-            assert_not_nil discount.discountable_id
-            assert_equal 'Book', discount.discountable_type
-          end
-        end
-      end
-
-      [{ recursive: false }, {}].each do |import_options|
-        it "skips recursion for #{import_options}" do
-          assert_difference "Book.count", 0 do
-            Topic.import new_topics, import_options
-          end
-        end
-      end
-
-      it 'imports deeper nested associations' do
-        assert_difference "Chapter.count", +num_chapters do
-          assert_difference "EndNote.count", +num_endnotes do
-            Topic.import new_topics, recursive: true
-            new_topics.each do |topic|
-              topic.books.each do |book|
-                book.chapters.each do |chapter|
-                  assert_equal book.id, chapter.book_id
-                end
-                book.end_notes.each do |endnote|
-                  assert_equal book.id, endnote.book_id
-                end
-              end
-            end
-          end
-        end
-      end
-
-      it "skips validation of the associations if requested" do
-        assert_difference "Chapter.count", +num_chapters do
-          Topic.import new_topics_with_invalid_chapter, validate: false, recursive: true
-        end
-      end
-
-      it 'imports has_one associations' do
-        assert_difference 'Rule.count' do
-          Question.import [new_question_with_rule], recursive: true
-        end
-      end
-
-      # These models dont validate associated.  So we expect that books and topics get inserted, but not chapters
-      # Putting a transaction around everything wouldn't work, so if you want your chapters to prevent topics from
-      # being created, you would need to have validates_associated in your models and insert with validation
-      describe "all_or_none" do
-        [Book, Topic, EndNote].each do |type|
-          it "creates #{type}" do
-            assert_difference "#{type}.count", send("num_#{type.to_s.downcase}s") do
-              Topic.import new_topics_with_invalid_chapter, all_or_none: true, recursive: true
-            end
-          end
-        end
-        it "doesn't create chapters" do
-          assert_difference "Chapter.count", 0 do
-            Topic.import new_topics_with_invalid_chapter, all_or_none: true, recursive: true
-          end
-        end
       end
     end
 
@@ -147,11 +47,99 @@ def should_support_postgresql_import_functionality
         end
       end
     end
+
+    describe "no_returning" do
+      let(:books) { [Book.new(author_name: "foo", title: "bar")] }
+
+      it "creates records" do
+        assert_difference "Book.count", +1 do
+          Book.import books, no_returning: true
+        end
+      end
+
+      it "returns no ids" do
+        assert_equal [], Book.import(books, no_returning: true).ids
+      end
+    end
+  end
+
+  if ENV['AR_VERSION'].to_f >= 4.0
+    describe "with a uuid primary key" do
+      let(:vendor) { Vendor.new(name: "foo") }
+      let(:vendors) { [vendor] }
+
+      it "creates records" do
+        assert_difference "Vendor.count", +1 do
+          Vendor.import vendors
+        end
+      end
+
+      it "assigns an id to the model objects" do
+        Vendor.import vendors
+        assert_not_nil vendor.id
+      end
+    end
+
+    describe "with an assigned uuid primary key" do
+      let(:id) { SecureRandom.uuid }
+      let(:vendor) { Vendor.new(id: id, name: "foo") }
+      let(:vendors) { [vendor] }
+
+      it "creates records with correct id" do
+        assert_difference "Vendor.count", +1 do
+          Vendor.import vendors
+        end
+        assert_equal id, vendor.id
+      end
+    end
+  end
+
+  describe "with store accessor fields" do
+    if ENV['AR_VERSION'].to_f >= 4.0
+      it "imports values for json fields" do
+        vendors = [Vendor.new(name: 'Vendor 1', size: 100)]
+        assert_difference "Vendor.count", +1 do
+          Vendor.import vendors
+        end
+        assert_equal(100, Vendor.first.size)
+      end
+
+      it "imports values for hstore fields" do
+        vendors = [Vendor.new(name: 'Vendor 1', contact: 'John Smith')]
+        assert_difference "Vendor.count", +1 do
+          Vendor.import vendors
+        end
+        assert_equal('John Smith', Vendor.first.contact)
+      end
+    end
+
+    if ENV['AR_VERSION'].to_f >= 4.2
+      it "imports values for jsonb fields" do
+        vendors = [Vendor.new(name: 'Vendor 1', charge_code: '12345')]
+        assert_difference "Vendor.count", +1 do
+          Vendor.import vendors
+        end
+        assert_equal('12345', Vendor.first.charge_code)
+      end
+    end
+  end
+
+  if ENV['AR_VERSION'].to_f >= 4.2
+    describe "with serializable fields" do
+      it "imports default values as correct data type" do
+        vendors = [Vendor.new(name: 'Vendor 1')]
+        assert_difference "Vendor.count", +1 do
+          Vendor.import vendors
+        end
+        assert_equal({}, Vendor.first.json_data)
+      end
+    end
   end
 end
 
 def should_support_postgresql_upsert_functionality
   should_support_basic_on_duplicate_key_update
+  should_support_on_duplicate_key_ignore
 
   describe "#import" do
     extend ActiveSupport::TestCase::ImportAssertions
@@ -164,28 +152,32 @@ def should_support_postgresql_upsert_functionality
       let(:values) { [[99, "Book", "John Doe", "john@doe.com", 17]] }
       let(:updated_values) { [[99, "Book - 2nd Edition", "Author Should Not Change", "johndoe@example.com", 57]] }
 
-      macro(:perform_import) do |*opts|
-        Topic.import columns, updated_values, opts.extract_options!.merge(on_duplicate_key_ignore: value, validate: false)
-      end
-
       setup do
         Topic.import columns, values, validate: false
-        @topic = Topic.find 99
       end
 
-      context "using true" do
-        let(:value) { true }
-        should_not_update_updated_at_on_timestamp_columns
+      it "should not update any records" do
+        result = Topic.import columns, updated_values, on_duplicate_key_ignore: true, validate: false
+        assert_equal [], result.ids
+      end
+    end
+
+    context "with :on_duplicate_key_ignore and :recursive enabled" do
+      let(:new_topic) { Build(1, :topic_with_book) }
+      let(:mixed_topics) { Build(1, :topic_with_book) + new_topic + Build(1, :topic_with_book) }
+
+      setup do
+        Topic.import new_topic, recursive: true
       end
 
-      context "using hash with :conflict_target" do
-        let(:value) { { conflict_target: :id } }
-        should_not_update_updated_at_on_timestamp_columns
-      end
-
-      context "using hash with :constraint_target" do
-        let(:value) { { constraint_name: :topics_pkey } }
-        should_not_update_updated_at_on_timestamp_columns
+      # Recursive import depends on the primary keys of the parent model being returned
+      # on insert. With on_duplicate_key_ignore enabled, not all ids will be returned
+      # and it is possible that a model will be assigned the wrong id and then its children
+      # would be associated with the wrong parent.
+      it ":on_duplicate_key_ignore is ignored" do
+        assert_raise ActiveRecord::RecordNotUnique do
+          Topic.import mixed_topics, recursive: true, on_duplicate_key_ignore: true, validate: false
+        end
       end
     end
 
@@ -237,6 +229,83 @@ def should_support_postgresql_upsert_functionality
           end
         end
 
+        context 'with :index_predicate' do
+          let(:columns) { %w( id device_id alarm_type status metadata ) }
+          let(:values) { [[99, 17, 1, 1, 'foo']] }
+          let(:updated_values) { [[99, 17, 1, 2, 'bar']] }
+
+          macro(:perform_import) do |*opts|
+            Alarm.import columns, updated_values, opts.extract_options!.merge(on_duplicate_key_update: { conflict_target: [:device_id, :alarm_type], index_predicate: 'status <> 0', columns: [:status] }, validate: false)
+          end
+
+          macro(:updated_alarm) { Alarm.find(@alarm.id) }
+
+          setup do
+            Alarm.import columns, values, validate: false
+            @alarm = Alarm.find 99
+          end
+
+          context 'supports on duplicate key update for partial indexes' do
+            it 'should not update created_at timestamp columns' do
+              Timecop.freeze Chronic.parse("5 minutes from now") do
+                perform_import
+                assert_in_delta @alarm.created_at.to_i, updated_alarm.created_at.to_i, 1
+              end
+            end
+
+            it 'should update updated_at timestamp columns' do
+              time = Chronic.parse("5 minutes from now")
+              Timecop.freeze time do
+                perform_import
+                assert_in_delta time.to_i, updated_alarm.updated_at.to_i, 1
+              end
+            end
+
+            it 'should not update fields not mentioned' do
+              perform_import
+              assert_equal 'foo', updated_alarm.metadata
+            end
+
+            it 'should update fields mentioned with hash mappings' do
+              perform_import
+              assert_equal 2, updated_alarm.status
+            end
+          end
+        end
+
+        context 'with :condition' do
+          let(:columns) { %w( id device_id alarm_type status metadata) }
+          let(:values) { [[99, 17, 1, 1, 'foo']] }
+          let(:updated_values) { [[99, 17, 1, 1, 'bar']] }
+
+          macro(:perform_import) do |*opts|
+            Alarm.import(
+              columns,
+              updated_values,
+              opts.extract_options!.merge(
+                on_duplicate_key_update: {
+                  conflict_target: [:id],
+                  condition: "alarms.metadata NOT LIKE '%foo%'",
+                  columns: [:metadata]
+                },
+                validate: false
+              )
+            )
+          end
+
+          macro(:updated_alarm) { Alarm.find(@alarm.id) }
+
+          setup do
+            Alarm.import columns, values, validate: false
+            @alarm = Alarm.find 99
+          end
+
+          it 'should not update fields not matched' do
+            perform_import
+            assert_equal 'foo', updated_alarm.metadata
+          end
+        end
+
         context "with :constraint_name" do
           let(:columns) { %w( id title author_name author_email_address parent_id ) }
           let(:values) { [[100, "Book", "John Doe", "john@doe.com", 17]] }
@@ -256,24 +325,53 @@ def should_support_postgresql_upsert_functionality
           should_update_fields_mentioned
         end
 
-        context "with no :conflict_target or :constraint_name" do
+        context "default to the primary key" do
           let(:columns) { %w( id title author_name author_email_address parent_id ) }
           let(:values) { [[100, "Book", "John Doe", "john@doe.com", 17]] }
           let(:updated_values) { [[100, "Book - 2nd Edition", "Author Should Not Change", "johndoe@example.com", 57]] }
-
-          macro(:perform_import) do |*opts|
-            Topic.import columns, updated_values, opts.extract_options!.merge(on_duplicate_key_update: { columns: update_columns }, validate: false)
-          end
+          let(:update_columns) { [:title, :author_email_address, :parent_id] }
 
           setup do
             Topic.import columns, values, validate: false
             @topic = Topic.find 100
           end
 
-          context "default to the primary key" do
-            let(:update_columns) { [:title, :author_email_address, :parent_id] }
+          context "with no :conflict_target or :constraint_name" do
+            macro(:perform_import) do |*opts|
+              Topic.import columns, updated_values, opts.extract_options!.merge(on_duplicate_key_update: { columns: update_columns }, validate: false)
+            end
+
             should_support_on_duplicate_key_update
             should_update_fields_mentioned
+          end
+
+          context "with empty value for :conflict_target" do
+            macro(:perform_import) do |*opts|
+              Topic.import columns, updated_values, opts.extract_options!.merge(on_duplicate_key_update: { conflict_target: [], columns: update_columns }, validate: false)
+            end
+
+            should_support_on_duplicate_key_update
+            should_update_fields_mentioned
+          end
+
+          context "with empty value for :constraint_name" do
+            macro(:perform_import) do |*opts|
+              Topic.import columns, updated_values, opts.extract_options!.merge(on_duplicate_key_update: { constraint_name: '', columns: update_columns }, validate: false)
+            end
+
+            should_support_on_duplicate_key_update
+            should_update_fields_mentioned
+          end
+        end
+
+        context "with no :conflict_target or :constraint_name" do
+          context "with no primary key" do
+            it "raises ArgumentError" do
+              error = assert_raises ArgumentError do
+                Rule.import Build(3, :rules), on_duplicate_key_update: [:condition_text], validate: false
+              end
+              assert_match(/Expected :conflict_target or :constraint_name to be specified/, error.message)
+            end
           end
         end
 
@@ -292,19 +390,6 @@ def should_support_postgresql_upsert_functionality
           end
 
           should_update_updated_at_on_timestamp_columns
-        end
-      end
-
-      context "with recursive: true" do
-        let(:new_topics) { Build(1, :topic_with_book) }
-
-        it "imports objects with associations" do
-          assert_difference "Topic.count", +1 do
-            Topic.import new_topics, recursive: true, on_duplicate_key_update: [:updated_at], validate: false
-            new_topics.each do |topic|
-              assert_not_nil topic.id
-            end
-          end
         end
       end
     end

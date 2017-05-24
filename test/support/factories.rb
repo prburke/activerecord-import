@@ -32,6 +32,7 @@ FactoryGirl.define do
   end
 
   factory :rule do
+    sequence(:id) { |n| n }
     sequence(:condition_text) { |n| "q_#{n}_#{n}" }
   end
 
@@ -48,5 +49,15 @@ FactoryGirl.define do
         end
       end
     end
+  end
+
+  factory :book do
+    title 'Tortilla Flat'
+    author_name 'John Steinbeck'
+  end
+
+  factory :car do
+    sequence(:Name) { |n| n }
+    sequence(:Features) { |n| "Feature #{n}" }
   end
 end
