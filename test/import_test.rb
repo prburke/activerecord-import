@@ -752,10 +752,14 @@ describe "#import" do
 
       it "imports values for serialized fields on saved records" do
         widget = Widget.create!(json_data: { a: :b })
+
         assert_difference "Widget.unscoped.count", +1 do
-          Widget.import [widget]
+          Widget.import [Widget.last]
         end
-        assert_equal({ a: :b }.as_json, Widget.last.json_data)
+
+        Widget.all.each do |w|
+          assert_equal({ a: :b }.as_json, w.json_data)
+        end
       end
     end
   end

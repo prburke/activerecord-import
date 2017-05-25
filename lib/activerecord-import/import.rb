@@ -435,17 +435,9 @@ class ActiveRecord::Base
           column_names.delete(primary_key)
         end
 
-        stored_attrs = respond_to?(:stored_attributes) ? stored_attributes : {}
-        default_values = column_defaults
-
         array_of_attributes = models.map do |model|
           column_names.map do |name|
-            is_stored_attr = stored_attrs.any? && stored_attrs.key?(name.to_sym)
-            if is_stored_attr || default_values[name].is_a?(Hash)
-              model.read_attribute(name.to_s)
-            else
-              model.read_attribute_before_type_cast(name.to_s)
-            end
+            model.read_attribute(name.to_s)
           end
         end
         # supports array of hash objects
